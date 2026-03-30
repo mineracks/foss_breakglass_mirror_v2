@@ -385,6 +385,10 @@ sync_repo() {
   git config remote.origin.prune false
   git config remote.origin.tagOpt --no-tags  # we fetch tags explicitly
 
+  # Suppress LFS locking messages (we're a one-way mirror, no locking needed)
+  git config lfs.locksverify false
+  git config lfs.https://${GITEA_URL#*://}.locksverify false 2>/dev/null || true
+
   # Set up gitea remote with embedded auth
   local authed_url="${GITEA_URL/https:\/\//https:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
   if git remote get-url gitea &>/dev/null; then
@@ -435,7 +439,7 @@ sync_repo() {
     log "    !! Upstream staging refs kept for manual inspection"
     audit "WIPE_BLOCKED repo=${gh_owner}/${repo} upstream_refs=$refs_upstream"
     notify "BREAKGLASS ALERT: Possible wipe detected for ${gh_owner}/${repo} — upstream went from $refs_before to $refs_upstream refs. Sync blocked, previous state preserved."
-    (( PROTECTED++ ))
+    (( PROTECTED++ )) || true
     # Still push existing state to Gitea (including the suspicious staging refs
     # so you can inspect them)
     push_to_gitea "$bare_dir" "$gitea_org" "$repo"
@@ -571,22 +575,22 @@ for entry in "${OWNERS[@]}"; do
   log "── Owner: $gh_owner → gitea:$gitea_org ──"
   ensure_gitea_org "$gitea_org"
 
-  repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )); continue; }
+  repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )) || true; continue; }
 
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
 
     if ! matches_glob "$repo" "${include_glob:-*}"; then
-      (( SKIPPED++ )); continue
+      (( SKIPPED++ )) || true; continue
     fi
     if [[ -n "$exclude_glob" ]] && matches_glob "$repo" "$exclude_glob"; then
-      (( SKIPPED++ )); continue
+      (( SKIPPED++ )) || true; continue
     fi
 
     if sync_repo "$gh_owner" "$repo" "$gitea_org"; then
-      (( SYNCED++ ))
+      (( SYNCED++ )) || true
     else
-      (( ERRORS++ ))
+      (( ERRORS++ )) || true
     fi
   done <<< "$repos"
 done
