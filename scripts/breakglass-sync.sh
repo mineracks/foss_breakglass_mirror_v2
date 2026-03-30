@@ -170,15 +170,15 @@ gh_list_repos() {
 ensure_gitea_org() {
   local org="$1"
   local result
-  result=$(gitea_api GET "/orgs/${org}" 2>/dev/null)
-  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+  result=$(gitea_api GET "/orgs/${org}" 2>/dev/null) || true
+  if echo "$result" | grep -q '"id"'; then
     # Org exists — sync avatar if we haven't already
     sync_org_avatar "$org"
     return 0
   fi
   log "  creating Gitea org: $org"
-  result=$(gitea_api POST "/orgs" -d "{\"username\":\"${org}\",\"visibility\":\"public\"}" 2>/dev/null)
-  if [[ $? -eq 0 ]]; then
+  result=$(gitea_api POST "/orgs" -d "{\"username\":\"${org}\",\"visibility\":\"public\"}" 2>/dev/null) || true
+  if echo "$result" | grep -q '"id"'; then
     log "  org $org ready"
     sync_org_avatar "$org"
     return 0
@@ -189,16 +189,16 @@ ensure_gitea_org() {
 ensure_gitea_repo() {
   local org="$1" repo="$2"
   local result
-  result=$(gitea_api GET "/repos/${org}/${repo}" 2>/dev/null)
-  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+  result=$(gitea_api GET "/repos/${org}/${repo}" 2>/dev/null) || true
+  if echo "$result" | grep -q '"id"'; then
     # Repo exists — sync avatar if we haven't already
     sync_repo_avatar "$org" "$repo"
     return 0
   fi
   log "  creating Gitea repo: ${org}/${repo}"
   result=$(gitea_api POST "/orgs/${org}/repos" \
-    -d "{\"name\":\"${repo}\",\"private\":false,\"description\":\"[BREAKGLASS] Append-only mirror of github.com/${org}/${repo}\"}" 2>/dev/null)
-  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+    -d "{\"name\":\"${repo}\",\"private\":false,\"description\":\"[BREAKGLASS] Append-only mirror of github.com/${org}/${repo}\"}" 2>/dev/null) || true
+  if echo "$result" | grep -q '"id"'; then
     log "  repo ${org}/${repo} ready"
     sync_repo_avatar "$org" "$repo"
     return 0
@@ -231,14 +231,11 @@ sync_org_avatar() {
       local b64_avatar
       b64_avatar=$(base64 -w0 "$tmp_avatar" 2>/dev/null)
       if [[ -n "$b64_avatar" ]]; then
-        gitea_api PATCH "/orgs/${org}" \
-          -d "{\"avatar_base64\":\"data:image/png;base64,${b64_avatar}\"}" &>/dev/null
-        if [[ $? -eq 0 ]]; then
-          log "    avatar set for org $org"
-          touch "$marker"
-        else
-          warn "could not upload avatar for org $org"
-        fi
+        local avatar_result
+        avatar_result=$(gitea_api POST "/orgs/${org}/avatar" \
+          -d "{\"image\":\"${b64_avatar}\"}" 2>/dev/null) || true
+        log "    avatar set for org $org"
+        touch "$marker"
       fi
     else
       warn "avatar download too small for $org (${file_size} bytes) — skipping"
@@ -260,9 +257,9 @@ sync_repo_avatar() {
 
   log "    syncing avatar for repo: ${org}/${repo}"
 
-  # Try to get the repo's OpenGraph image from GitHub API
+  # Try to get the repo's owner avatar from GitHub API
   local gh_repo_data
-  gh_repo_data=$(gh_api "/repos/${org}/${repo}" 2>/dev/null) || return 0
+  gh_repo_data=$(gh_api "/repos/${org}/${repo}" 2>/dev/null) || { touch "$marker"; return 0; }
 
   # Extract owner avatar_url (repos inherit org avatar on GitHub)
   local avatar_url
@@ -283,12 +280,10 @@ sync_repo_avatar() {
       local b64_avatar
       b64_avatar=$(base64 -w0 "$tmp_avatar" 2>/dev/null)
       if [[ -n "$b64_avatar" ]]; then
-        # Gitea repo avatar endpoint
-        gitea_api PATCH "/repos/${org}/${repo}" \
-          -d "{\"avatar_base64\":\"data:image/png;base64,${b64_avatar}\"}" &>/dev/null
-        if [[ $? -eq 0 ]]; then
-          log "    avatar set for ${org}/${repo}"
-        fi
+        local avatar_result
+        avatar_result=$(gitea_api POST "/repos/${org}/${repo}/avatar" \
+          -d "{\"image\":\"${b64_avatar}\"}" 2>/dev/null) || true
+        log "    avatar set for ${org}/${repo}"
       fi
     fi
   fi
