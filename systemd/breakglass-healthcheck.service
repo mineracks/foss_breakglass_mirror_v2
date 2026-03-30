@@ -1,0 +1,19 @@
+[Unit]
+Description=Breakglass FOSS Git Mirror — stale repo health check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=breakglass
+Group=breakglass
+EnvironmentFile=/etc/breakglass/mirror.env
+ExecStart=/opt/breakglass/scripts/breakglass-healthcheck.sh
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/breakglass
+PrivateTmp=true
+
+TimeoutStartSec=300

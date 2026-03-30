@@ -1,0 +1,12 @@
+[Unit]
+Description=Breakglass FOSS Git Mirror — daily health check
+Documentation=https://git.mineracks.com/mineracks/foss_breakglass_git_mirror
+
+[Timer]
+# Run daily at 08:00 UTC — a few hours after sync, so stale = genuinely broken
+OnCalendar=*-*-* 08:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

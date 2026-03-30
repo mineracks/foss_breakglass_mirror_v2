@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────
+# sources.yml — GitHub owners/orgs to mirror
+# ─────────────────────────────────────────────────────────
+#
+# Each entry creates a matching Gitea org (if it doesn't
+# exist) and mirrors every public repo from that GitHub
+# owner into it.
+#
+# Optional per-owner settings:
+#   include:  only mirror repos matching these patterns
+#   exclude:  skip repos matching these patterns
+#             (patterns are shell globs evaluated with bash [[ ]])
+#
+# If neither include nor exclude is set, all repos are mirrored.
+# ─────────────────────────────────────────────────────────
+
+owners:
+  - github: bitcoin
+    # gitea_org defaults to the github name if omitted
+    # gitea_org: bitcoin
+
+  - github: sparrowwallet
+
+  - github: seedsigner
+
+  - github: seedhammer
+
+  # ── Example with filters ──────────────────────────────
+  # - github: torvalds
+  #   include:
+  #     - "linux"
+  #   exclude:
+  #     - "test-*"

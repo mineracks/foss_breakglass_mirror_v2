@@ -1,0 +1,32 @@
+[Unit]
+Description=Breakglass FOSS Git Mirror — sync run
+Documentation=https://git.mineracks.com/mineracks/foss_breakglass_git_mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=breakglass
+Group=breakglass
+EnvironmentFile=/etc/breakglass/mirror.env
+ExecStart=/opt/breakglass/scripts/breakglass-sync.sh
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/breakglass /var/log/breakglass
+# IMPORTANT: The service cannot delete from /var/lib/breakglass/audit
+# due to the append-only filesystem attribute set during install.
+PrivateTmp=true
+PrivateDevices=true
+
+# Resource limits — be a good neighbour
+MemoryMax=1G
+CPUQuota=80%
+
+# Allow long runs (large repos can take a while)
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target
