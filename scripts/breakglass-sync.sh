@@ -77,21 +77,39 @@ retry() {
 
 # ── HTTP helpers ─────────────────────────────────────────
 
-curl_opts=(-sfS --connect-timeout 15 --max-time 120)
-[[ "$FORCE_HTTP11" == "true" ]] && curl_opts+=(--http1.1)
+# GitHub API calls — may go through Cloudflare, so honour FORCE_HTTP11
+gh_curl_opts=(-sfS --connect-timeout 15 --max-time 120)
+[[ "$FORCE_HTTP11" == "true" ]] && gh_curl_opts+=(--http1.1)
+
+# Gitea API calls — typically localhost, no need for --http1.1
+# Use -sS (not -f) so we can inspect HTTP responses ourselves
+gitea_curl_opts=(-sS --connect-timeout 15 --max-time 300)
 
 gh_api() {
   local path="$1"; shift
   local -a headers=(-H "Accept: application/vnd.github+json")
   [[ -n "${GITHUB_TOKEN:-}" ]] && headers+=(-H "Authorization: Bearer $GITHUB_TOKEN")
-  curl "${curl_opts[@]}" "${headers[@]}" "https://api.github.com${path}" "$@"
+  curl "${gh_curl_opts[@]}" "${headers[@]}" "https://api.github.com${path}" "$@"
 }
 
 gitea_api() {
   local method="$1" path="$2"; shift 2
   local -a args=(-X "$method" -H "Content-Type: application/json"
                  -H "Authorization: token $GITEA_TOKEN")
-  curl "${curl_opts[@]}" "${args[@]}" "${GITEA_URL}/api/v1${path}" "$@"
+  local response http_code
+  response=$(curl "${gitea_curl_opts[@]}" -w "\n%{http_code}" "${args[@]}" "${GITEA_URL}/api/v1${path}" "$@" 2>&1)
+  http_code=$(echo "$response" | tail -1)
+  response=$(echo "$response" | sed '$d')
+
+  # Return the response body on stdout
+  echo "$response"
+
+  # Return success for 2xx and 409 (conflict = already exists, which is fine)
+  case "$http_code" in
+    2[0-9][0-9]) return 0 ;;
+    409)         return 0 ;;
+    *)           return 1 ;;
+  esac
 }
 
 # ── YAML-lite parser ─────────────────────────────────────
@@ -151,19 +169,131 @@ gh_list_repos() {
 
 ensure_gitea_org() {
   local org="$1"
-  if gitea_api GET "/orgs/${org}" &>/dev/null; then return 0; fi
+  local result
+  result=$(gitea_api GET "/orgs/${org}" 2>/dev/null)
+  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+    # Org exists — sync avatar if we haven't already
+    sync_org_avatar "$org"
+    return 0
+  fi
   log "  creating Gitea org: $org"
-  gitea_api POST "/orgs" -d "{\"username\":\"${org}\",\"visibility\":\"public\"}" &>/dev/null \
-    || warn "could not create org $org — will push under $GITEA_USER"
+  result=$(gitea_api POST "/orgs" -d "{\"username\":\"${org}\",\"visibility\":\"public\"}" 2>/dev/null)
+  if [[ $? -eq 0 ]]; then
+    log "  org $org ready"
+    sync_org_avatar "$org"
+    return 0
+  fi
+  warn "could not create org $org — will push under $GITEA_USER"
 }
 
 ensure_gitea_repo() {
   local org="$1" repo="$2"
-  if gitea_api GET "/repos/${org}/${repo}" &>/dev/null; then return 0; fi
+  local result
+  result=$(gitea_api GET "/repos/${org}/${repo}" 2>/dev/null)
+  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+    # Repo exists — sync avatar if we haven't already
+    sync_repo_avatar "$org" "$repo"
+    return 0
+  fi
   log "  creating Gitea repo: ${org}/${repo}"
-  gitea_api POST "/orgs/${org}/repos" \
-    -d "{\"name\":\"${repo}\",\"private\":false,\"description\":\"[BREAKGLASS] Append-only mirror of github.com/${org}/${repo}\"}" &>/dev/null \
-    || { warn "could not create repo ${org}/${repo}"; return 1; }
+  result=$(gitea_api POST "/orgs/${org}/repos" \
+    -d "{\"name\":\"${repo}\",\"private\":false,\"description\":\"[BREAKGLASS] Append-only mirror of github.com/${org}/${repo}\"}" 2>/dev/null)
+  if [[ $? -eq 0 ]] && echo "$result" | grep -q '"id"'; then
+    log "  repo ${org}/${repo} ready"
+    sync_repo_avatar "$org" "$repo"
+    return 0
+  fi
+  warn "could not create repo ${org}/${repo}"
+  return 1
+}
+
+# ── Avatar/logo sync ────────────────────────────────────
+
+sync_org_avatar() {
+  local org="$1"
+  local avatar_cache="${MIRROR_ROOT}/.avatars"
+  local marker="${avatar_cache}/${org}.org.synced"
+  mkdir -p "$avatar_cache"
+
+  # Only sync once per org (remove marker file to force re-sync)
+  [[ -f "$marker" ]] && return 0
+
+  log "    syncing avatar for org: $org"
+
+  # Download from GitHub (works for both orgs and users)
+  local tmp_avatar="${avatar_cache}/${org}.png"
+  if curl -sS -L -o "$tmp_avatar" "https://github.com/${org}.png?size=256" 2>/dev/null; then
+    # Check we actually got an image (not an error page)
+    local file_size
+    file_size=$(stat -c %s "$tmp_avatar" 2>/dev/null || echo 0)
+    if (( file_size > 500 )); then
+      # Upload to Gitea via API — base64 encode the image
+      local b64_avatar
+      b64_avatar=$(base64 -w0 "$tmp_avatar" 2>/dev/null)
+      if [[ -n "$b64_avatar" ]]; then
+        gitea_api PATCH "/orgs/${org}" \
+          -d "{\"avatar_base64\":\"data:image/png;base64,${b64_avatar}\"}" &>/dev/null
+        if [[ $? -eq 0 ]]; then
+          log "    avatar set for org $org"
+          touch "$marker"
+        else
+          warn "could not upload avatar for org $org"
+        fi
+      fi
+    else
+      warn "avatar download too small for $org (${file_size} bytes) — skipping"
+    fi
+  else
+    warn "could not download GitHub avatar for $org"
+  fi
+  rm -f "$tmp_avatar"
+}
+
+sync_repo_avatar() {
+  local org="$1" repo="$2"
+  local avatar_cache="${MIRROR_ROOT}/.avatars"
+  local marker="${avatar_cache}/${org}_${repo}.repo.synced"
+  mkdir -p "$avatar_cache"
+
+  # Only sync once per repo
+  [[ -f "$marker" ]] && return 0
+
+  log "    syncing avatar for repo: ${org}/${repo}"
+
+  # Try to get the repo's OpenGraph image from GitHub API
+  local gh_repo_data
+  gh_repo_data=$(gh_api "/repos/${org}/${repo}" 2>/dev/null) || return 0
+
+  # Extract owner avatar_url (repos inherit org avatar on GitHub)
+  local avatar_url
+  avatar_url=$(echo "$gh_repo_data" | grep -o '"avatar_url"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+    | sed 's/"avatar_url"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+  if [[ -z "$avatar_url" ]]; then
+    # No custom avatar — just mark as done (inherits org avatar in Gitea too)
+    touch "$marker"
+    return 0
+  fi
+
+  local tmp_avatar="${avatar_cache}/${org}_${repo}.png"
+  if curl -sS -L -o "$tmp_avatar" "${avatar_url}" 2>/dev/null; then
+    local file_size
+    file_size=$(stat -c %s "$tmp_avatar" 2>/dev/null || echo 0)
+    if (( file_size > 500 )); then
+      local b64_avatar
+      b64_avatar=$(base64 -w0 "$tmp_avatar" 2>/dev/null)
+      if [[ -n "$b64_avatar" ]]; then
+        # Gitea repo avatar endpoint
+        gitea_api PATCH "/repos/${org}/${repo}" \
+          -d "{\"avatar_base64\":\"data:image/png;base64,${b64_avatar}\"}" &>/dev/null
+        if [[ $? -eq 0 ]]; then
+          log "    avatar set for ${org}/${repo}"
+        fi
+      fi
+    fi
+  fi
+  touch "$marker"
+  rm -f "$tmp_avatar"
 }
 
 # ═══════════════════════════════════════════════════════════
