@@ -193,6 +193,27 @@ if [[ -d "$MIRROR_ROOT" ]]; then
   log "  OK"
 fi
 
+# ── Check 8: Disk space ─────────────────────────────────
+log "Check 8: Disk space …"
+DISK_WARN_PCT="${DISK_WARN_PCT:-80}"
+DISK_CRIT_PCT="${DISK_CRIT_PCT:-90}"
+DISK_USE_PCT=$(df --output=pcent "$MIRROR_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9')
+DISK_AVAIL=$(df -h --output=avail "$MIRROR_ROOT" 2>/dev/null | tail -1 | xargs)
+
+if [[ -n "$DISK_USE_PCT" ]]; then
+  if (( DISK_USE_PCT >= DISK_CRIT_PCT )); then
+    PROBLEMS+=("Disk ${DISK_USE_PCT}% full (${DISK_AVAIL} free) — mirrors at risk")
+    log "  CRITICAL: ${DISK_USE_PCT}% used, ${DISK_AVAIL} free"
+  elif (( DISK_USE_PCT >= DISK_WARN_PCT )); then
+    WARNINGS+=("Disk ${DISK_USE_PCT}% full (${DISK_AVAIL} free) — consider expanding")
+    log "  WARN: ${DISK_USE_PCT}% used, ${DISK_AVAIL} free"
+  else
+    log "  OK: ${DISK_USE_PCT}% used, ${DISK_AVAIL} free"
+  fi
+else
+  log "  SKIP: could not read disk usage"
+fi
+
 # ── Report ───────────────────────────────────────────────
 log ""
 TOTAL_ISSUES=$(( ${#PROBLEMS[@]} + ${#WARNINGS[@]} ))
