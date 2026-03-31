@@ -1,14 +1,16 @@
 [Unit]
 Description=Breakglass FOSS Git Mirror — daily sync
-Documentation=https://git.mineracks.com/mineracks/foss_breakglass_git_mirror
+Documentation=https://git.mineracks.com/mineracks/foss_breakglass_mirror_v2
 
 [Timer]
-# Run daily at 04:00 UTC (avoids peak GitHub traffic)
-OnCalendar=*-*-* 04:00:00
-# Randomise start by up to 30 min to avoid thundering herd
-RandomizedDelaySec=1800
+# Run daily at 02:00 AEST (16:00 UTC previous day) — low-traffic window
+OnCalendar=*-*-* 02:00:00
+# Randomise start by up to 15 min
+RandomizedDelaySec=900
 # If the machine was off at trigger time, run on next boot
 Persistent=true
+# Also run 30 seconds after boot (catch up after reboots/maintenance)
+OnBootSec=30
 
 [Install]
 WantedBy=timers.target

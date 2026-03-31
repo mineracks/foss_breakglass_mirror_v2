@@ -433,7 +433,7 @@ sync_repo() {
     log "    !! Previous state preserved in refs/backup/${TIMESTAMP}/"
     log "    !! Upstream staging refs kept for manual inspection"
     audit "WIPE_BLOCKED repo=${gh_owner}/${repo} upstream_refs=$refs_upstream"
-    notify "BREAKGLASS ALERT: Possible wipe detected for ${gh_owner}/${repo} — upstream went from $refs_before to $refs_upstream refs. Sync blocked, previous state preserved."
+    notify "BREAKGLASS ALERT: Possible wipe detected for ${gh_owner}/${repo} — upstream went from $refs_before to $refs_upstream refs. Sync blocked, previous state preserved." "urgent" "rotating_light,shield"
     (( PROTECTED++ )) || true
     # Still push existing state to Gitea (including the suspicious staging refs
     # so you can inspect them)
@@ -521,9 +521,14 @@ push_to_gitea() {
 
 notify() {
   local message="$1"
+  local priority="${2:-default}"   # ntfy priority: min/low/default/high/urgent
+  local tags="${3:-}"              # ntfy tags (emoji shortcodes)
   case "${NOTIFY_METHOD}" in
     ntfy)
-      curl -sfS -d "$message" "${NTFY_SERVER:-https://ntfy.sh}/${NTFY_TOPIC:-}" &>/dev/null || true
+      local -a ntfy_args=(-sfS -d "$message")
+      [[ -n "$priority" ]] && ntfy_args+=(-H "Priority: $priority")
+      [[ -n "$tags" ]] && ntfy_args+=(-H "Tags: $tags")
+      curl "${ntfy_args[@]}" "${NTFY_SERVER:-https://ntfy.sh}/${NTFY_TOPIC:-breakglass}" &>/dev/null || true
       ;;
     email)
       echo "$message" | mail -s "Breakglass Mirror Alert" "${NOTIFY_EMAIL:-}" 2>/dev/null || true
@@ -592,13 +597,19 @@ done
 
 # ── Summary ──────────────────────────────────────────────
 
-SUMMARY="Breakglass sync: ${SYNCED} synced, ${SKIPPED} skipped, ${PROTECTED} wipe-protected, ${ERRORS} errors"
+DURATION=$(( $(date +%s) - $(date -d "$TIMESTAMP" +%s 2>/dev/null || date -u -d "${TIMESTAMP:0:8} ${TIMESTAMP:9:2}:${TIMESTAMP:11:2}:${TIMESTAMP:13:2}" +%s 2>/dev/null || echo 0) ))
+DURATION_MIN=$(( DURATION / 60 ))
+SUMMARY="Breakglass sync: ${SYNCED} synced, ${SKIPPED} skipped, ${PROTECTED} wipe-protected, ${ERRORS} errors (${DURATION_MIN}m)"
 log ""
 log "═══ $SUMMARY ═══"
 audit "SESSION_END $SUMMARY"
 
-if (( ERRORS > 0 || PROTECTED > 0 )); then
-  notify "$SUMMARY — check $LOG_FILE"
+if (( PROTECTED > 0 )); then
+  notify "🛡️ $SUMMARY — WIPE PROTECTION ACTIVATED — check $LOG_FILE" "urgent" "rotating_light,shield"
+elif (( ERRORS > 0 )); then
+  notify "⚠️ $SUMMARY — check $LOG_FILE" "high" "warning"
+else
+  notify "✅ $SUMMARY" "low" "white_check_mark"
 fi
 
 # ── Log rotation: keep 90 days (audit logs kept forever) ─

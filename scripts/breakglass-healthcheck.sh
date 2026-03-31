@@ -31,9 +31,14 @@ log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 notify() {
   local message="$1"
+  local priority="${2:-default}"
+  local tags="${3:-}"
   case "${NOTIFY_METHOD}" in
     ntfy)
-      curl -sfS -d "$message" "${NTFY_SERVER:-https://ntfy.sh}/${NTFY_TOPIC:-}" &>/dev/null || true
+      local -a ntfy_args=(-sfS -d "$message")
+      [[ -n "$priority" ]] && ntfy_args+=(-H "Priority: $priority")
+      [[ -n "$tags" ]] && ntfy_args+=(-H "Tags: $tags")
+      curl "${ntfy_args[@]}" "${NTFY_SERVER:-https://ntfy.sh}/${NTFY_TOPIC:-breakglass}" &>/dev/null || true
       ;;
     email)
       echo "$message" | mail -s "Breakglass Health Alert" "${NOTIFY_EMAIL:-}" 2>/dev/null || true
@@ -215,5 +220,9 @@ if [[ ${#WARNINGS[@]} -gt 0 ]]; then
   done
 fi
 
-notify "$(echo -e "${REPORT:-Health check completed with issues}")"
+if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
+  notify "$(echo -e "${REPORT:-Health check completed with issues}")" "high" "warning,stethoscope"
+else
+  notify "$(echo -e "${REPORT:-Health check completed with warnings}")" "default" "stethoscope"
+fi
 exit $(( ${#PROBLEMS[@]} > 0 ? 1 : 0 ))
