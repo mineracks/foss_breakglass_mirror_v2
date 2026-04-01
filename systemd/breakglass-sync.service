@@ -25,8 +25,8 @@ PrivateDevices=true
 MemoryMax=1G
 CPUQuota=80%
 
-# Allow long runs (bitcoin/bitcoin alone takes ~35 min to push)
-TimeoutStartSec=14400
+# Allow long runs (full sync across all orgs can take several hours)
+TimeoutStartSec=28800
 
 # Restart on failure after 5 minutes (transient network issues)
 Restart=on-failure

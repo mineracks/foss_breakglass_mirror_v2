@@ -473,9 +473,11 @@ sync_repo() {
   # If upstream deleted a branch, our copy keeps it. That's the point.
 
   # ── LFS objects ──────────────────────────────────────
+  # Time-boxed: LFS is best-effort. We never let it block the whole sync.
+  LFS_TIMEOUT="${LFS_TIMEOUT:-600}"  # 10 min default per repo
   if command -v git-lfs &>/dev/null && git config --get-regexp 'lfs\.' &>/dev/null 2>&1; then
-    log "    fetching LFS objects …"
-    git lfs fetch origin --all 2>>"$LOG_FILE" || warn "LFS fetch incomplete for ${gh_owner}/${repo}"
+    log "    fetching LFS objects (timeout: ${LFS_TIMEOUT}s) …"
+    timeout "$LFS_TIMEOUT" git lfs fetch origin --all 2>>"$LOG_FILE" || warn "LFS fetch skipped/incomplete for ${gh_owner}/${repo}"
   fi
 
   # ── Push to Gitea ───────────────────────────────────
@@ -508,10 +510,12 @@ push_to_gitea() {
     return 1
   fi
 
-  # Push LFS to Gitea
+  # Push LFS to Gitea — time-boxed to avoid blocking on huge repos (e.g. buildroot)
+  LFS_TIMEOUT="${LFS_TIMEOUT:-600}"
   if command -v git-lfs &>/dev/null && git config --get-regexp 'lfs\.' &>/dev/null 2>&1; then
-    git -C "$bare_dir" lfs push gitea --all 2>>"$LOG_FILE" || \
-      warn "LFS push incomplete for ${gitea_org}/${repo}"
+    log "    pushing LFS to Gitea (timeout: ${LFS_TIMEOUT}s) …"
+    timeout "$LFS_TIMEOUT" git -C "$bare_dir" lfs push gitea --all 2>>"$LOG_FILE" || \
+      warn "LFS push skipped/incomplete for ${gitea_org}/${repo} (may have timed out)"
   fi
 
   audit "PUSHED repo=${gitea_org}/${repo}"
