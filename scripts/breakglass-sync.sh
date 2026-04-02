@@ -745,7 +745,60 @@ push_to_gitea() {
       warn "LFS push skipped/incomplete for ${gitea_org}/${repo} (may have timed out)"
   fi
 
+  # ── Sync default branch and description from GitHub ───
+  sync_repo_metadata "$gitea_org" "$repo"
+
   audit "PUSHED repo=${gitea_org}/${repo}"
+}
+
+# ═══════════════════════════════════════════════════════════
+# METADATA: Sync default branch, description, website from GitHub
+# ═══════════════════════════════════════════════════════════
+
+sync_repo_metadata() {
+  local gitea_org="$1" repo="$2"
+  local marker="${MIRROR_ROOT}/.avatars/${gitea_org}_${repo}.meta.synced"
+
+  # Only sync metadata once per repo (delete marker to force re-sync)
+  [[ -f "$marker" ]] && return 0
+
+  # Get GitHub repo info
+  local gh_data
+  gh_data=$(gh_api "/repos/${gitea_org}/${repo}" 2>/dev/null) || return 0
+
+  # Extract default branch
+  local default_branch
+  default_branch=$(echo "$gh_data" | grep -o '"default_branch"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed 's/"default_branch"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+  # Extract description
+  local description
+  description=$(echo "$gh_data" | grep -o '"description"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+    | sed 's/"description"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+  # Extract homepage
+  local homepage
+  homepage=$(echo "$gh_data" | grep -o '"homepage"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed 's/"homepage"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+  if [[ -n "$default_branch" ]]; then
+    # Build the update payload
+    local payload="{\"default_branch\":\"${default_branch}\""
+    if [[ -n "$description" ]]; then
+      # Escape special JSON chars in description
+      description=$(echo "$description" | sed 's/\\/\\\\/g;s/"/\\"/g')
+      payload+=",\"description\":\"[BREAKGLASS] ${description}\""
+    fi
+    if [[ -n "$homepage" ]]; then
+      payload+=",\"website\":\"${homepage}\""
+    fi
+    payload+="}"
+
+    gitea_api PATCH "/repos/${gitea_org}/${repo}" -d "$payload" &>/dev/null || true
+    log "    metadata synced (default_branch: $default_branch)"
+  fi
+
+  touch "$marker"
 }
 
 # ── Notifications ────────────────────────────────────────
