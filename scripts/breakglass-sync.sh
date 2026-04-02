@@ -547,6 +547,9 @@ sync_wiki() {
     git remote add gitea "$gitea_wiki_url"
   fi
 
+  # Ensure credential helper is configured (uses same store as main repos)
+  git config credential.helper store
+
   git push gitea '+refs/heads/*:refs/heads/*' 2>>"$LOG_FILE" || {
     warn "wiki push failed for ${gitea_org}/${repo}"
     return 0
