@@ -32,6 +32,7 @@ source "$ENV_FILE"
 
 # ── Defaults ─────────────────────────────────────────────
 MIRROR_ROOT="${MIRROR_ROOT:-/var/lib/breakglass/repos}"
+RELEASE_ROOT="${RELEASE_ROOT:-/var/lib/breakglass/releases}"
 LOG_DIR="${LOG_DIR:-/var/log/breakglass}"
 AUDIT_DIR="${AUDIT_DIR:-/var/lib/breakglass/audit}"
 FORCE_HTTP11="${FORCE_HTTP11:-true}"
@@ -39,8 +40,13 @@ NOTIFY_METHOD="${NOTIFY_METHOD:-none}"
 # If upstream loses more than this % of refs, abort the push
 # as a likely malicious wipe. 0 = disabled.
 WIPE_THRESHOLD="${WIPE_THRESHOLD:-50}"
+# How many releases to keep per repo (latest N)
+RELEASE_KEEP="${RELEASE_KEEP:-3}"
+# Enable wiki and release syncing
+SYNC_WIKIS="${SYNC_WIKIS:-true}"
+SYNC_RELEASES="${SYNC_RELEASES:-true}"
 
-mkdir -p "$MIRROR_ROOT" "$LOG_DIR" "$AUDIT_DIR"
+mkdir -p "$MIRROR_ROOT" "$RELEASE_ROOT" "$LOG_DIR" "$AUDIT_DIR"
 
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 LOG_FILE="$LOG_DIR/sync-${TIMESTAMP}.log"
@@ -480,14 +486,232 @@ sync_repo() {
     timeout "$LFS_TIMEOUT" git lfs fetch origin --all 2>>"$LOG_FILE" || warn "LFS fetch skipped/incomplete for ${gh_owner}/${repo}"
   fi
 
+  # ── Wiki ─────────────────────────────────────────────
+  if [[ "$SYNC_WIKIS" == "true" ]]; then
+    sync_wiki "$gh_owner" "$repo" "$gitea_org"
+  fi
+
   # ── Push to Gitea ───────────────────────────────────
   push_to_gitea "$bare_dir" "$gitea_org" "$repo"
+
+  # ── Release assets ──────────────────────────────────
+  if [[ "$SYNC_RELEASES" == "true" ]]; then
+    sync_releases "$gh_owner" "$repo" "$gitea_org"
+  fi
 
   local refs_after
   refs_after=$(count_refs "$bare_dir")
   log "    ✓ done (refs: $refs_before → $refs_after)"
   audit "SYNC_OK repo=${gh_owner}/${repo} refs_before=$refs_before refs_after=$refs_after"
   return 0
+}
+
+# ═══════════════════════════════════════════════════════════
+# WIKI: Mirror the wiki repo (if it exists)
+# ═══════════════════════════════════════════════════════════
+
+sync_wiki() {
+  local gh_owner="$1" repo="$2" gitea_org="$3"
+  local wiki_url="https://github.com/${gh_owner}/${repo}.wiki.git"
+  local wiki_dir="${MIRROR_ROOT}/${gh_owner}/${repo}.wiki.git"
+
+  # Quick check: does the wiki exist? (HEAD request to avoid cloning empty wikis)
+  if ! curl -sfS --head --connect-timeout 10 "$wiki_url" &>/dev/null; then
+    return 0  # No wiki — skip silently
+  fi
+
+  log "    syncing wiki …"
+
+  if [[ ! -d "$wiki_dir" ]]; then
+    if ! git clone --bare "$wiki_url" "$wiki_dir" 2>>"$LOG_FILE"; then
+      warn "wiki clone failed for ${gh_owner}/${repo} (may not exist)"
+      return 0
+    fi
+    audit "WIKI_CLONED repo=${gh_owner}/${repo}"
+  fi
+
+  # Fetch latest wiki content
+  cd "$wiki_dir" || return 0
+  git remote set-url origin "$wiki_url" 2>/dev/null || true
+  git config remote.origin.prune false
+  git fetch origin '+refs/heads/*:refs/heads/*' 2>>"$LOG_FILE" || {
+    warn "wiki fetch failed for ${gh_owner}/${repo}"
+    return 0
+  }
+
+  # Push wiki to Gitea (Gitea auto-creates wiki repos on first push)
+  local gitea_wiki_url="${GITEA_URL}/${gitea_org}/${repo}.wiki.git"
+  if git remote get-url gitea &>/dev/null; then
+    git remote set-url gitea "$gitea_wiki_url"
+  else
+    git remote add gitea "$gitea_wiki_url"
+  fi
+
+  git push gitea '+refs/heads/*:refs/heads/*' 2>>"$LOG_FILE" || {
+    warn "wiki push failed for ${gitea_org}/${repo}"
+    return 0
+  }
+
+  log "    wiki synced"
+  audit "WIKI_SYNCED repo=${gh_owner}/${repo}"
+}
+
+# ═══════════════════════════════════════════════════════════
+# RELEASES: Download release assets from GitHub
+# ═══════════════════════════════════════════════════════════
+
+sync_releases() {
+  local gh_owner="$1" repo="$2" gitea_org="$3"
+  local release_dir="${RELEASE_ROOT}/${gh_owner}/${repo}"
+  mkdir -p "$release_dir"
+
+  # Fetch the latest N releases from GitHub API
+  local releases_json
+  releases_json=$(gh_api "/repos/${gh_owner}/${repo}/releases?per_page=${RELEASE_KEEP}" 2>/dev/null) || {
+    # No releases or API error — skip silently
+    return 0
+  }
+
+  # Check if there are any releases
+  local release_count
+  release_count=$(echo "$releases_json" | grep -c '"tag_name"' || true)
+  if (( release_count == 0 )); then
+    return 0
+  fi
+
+  log "    syncing releases (latest ${RELEASE_KEEP}) …"
+
+  # Parse each release: tag_name and assets
+  local tag_names
+  tag_names=$(echo "$releases_json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed 's/"tag_name"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+  while IFS= read -r tag; do
+    [[ -z "$tag" ]] && continue
+    local tag_dir="${release_dir}/${tag}"
+    local marker="${tag_dir}/.downloaded"
+
+    # Skip if we've already downloaded this release
+    if [[ -f "$marker" ]]; then
+      continue
+    fi
+
+    mkdir -p "$tag_dir"
+    log "      release: $tag"
+
+    # Get assets for this specific release
+    local release_data
+    release_data=$(gh_api "/repos/${gh_owner}/${repo}/releases/tags/${tag}" 2>/dev/null) || continue
+
+    # Save release metadata (description, notes, etc.)
+    echo "$release_data" > "${tag_dir}/release.json"
+
+    # Extract asset download URLs and names
+    # Format: "browser_download_url": "https://..."
+    local asset_urls
+    asset_urls=$(echo "$release_data" | grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed 's/"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+    local asset_names
+    asset_names=$(echo "$release_data" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//')
+
+    # Download each asset
+    local asset_count=0
+    while IFS= read -r url; do
+      [[ -z "$url" ]] && continue
+
+      local filename
+      filename=$(basename "$url")
+      local dest="${tag_dir}/${filename}"
+
+      if [[ ! -f "$dest" ]]; then
+        if curl "${gh_curl_opts[@]}" -L -o "$dest" "$url" 2>>"$LOG_FILE"; then
+          (( asset_count++ )) || true
+        else
+          warn "failed to download release asset: $url"
+          rm -f "$dest"
+        fi
+      fi
+    done <<< "$asset_urls"
+
+    # Also download the source archives (always available)
+    for fmt in tar.gz zip; do
+      local src_url="https://github.com/${gh_owner}/${repo}/archive/refs/tags/${tag}.${fmt}"
+      local src_dest="${tag_dir}/${repo}-${tag}.${fmt}"
+      if [[ ! -f "$src_dest" ]]; then
+        curl "${gh_curl_opts[@]}" -L -o "$src_dest" "$src_url" 2>>"$LOG_FILE" || rm -f "$src_dest"
+      fi
+    done
+
+    touch "$marker"
+    log "      $asset_count assets downloaded"
+    audit "RELEASE_SYNCED repo=${gh_owner}/${repo} tag=$tag assets=$asset_count"
+  done <<< "$tag_names"
+
+  # ── Upload releases to Gitea ──────────────────────────
+  # Create matching releases on Gitea and upload assets
+  while IFS= read -r tag; do
+    [[ -z "$tag" ]] && continue
+    local tag_dir="${release_dir}/${tag}"
+    local gitea_marker="${tag_dir}/.gitea_uploaded"
+
+    # Skip if already uploaded to Gitea
+    [[ -f "$gitea_marker" ]] && continue
+    [[ ! -f "${tag_dir}/release.json" ]] && continue
+
+    # Extract release name and body from saved metadata
+    local rel_name rel_body rel_prerelease
+    rel_name=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "${tag_dir}/release.json" | head -1 \
+      | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//')
+    rel_prerelease=$(grep -o '"prerelease"[[:space:]]*:[[:space:]]*[a-z]*' "${tag_dir}/release.json" | head -1 \
+      | sed 's/"prerelease"[[:space:]]*:[[:space:]]*//')
+
+    [[ -z "$rel_name" ]] && rel_name="$tag"
+    [[ -z "$rel_prerelease" ]] && rel_prerelease="false"
+
+    # Create the release on Gitea (idempotent — 409 if exists)
+    local create_result
+    create_result=$(gitea_api POST "/repos/${gitea_org}/${repo}/releases" \
+      -d "{\"tag_name\":\"${tag}\",\"name\":\"${rel_name}\",\"prerelease\":${rel_prerelease}}" 2>/dev/null) || true
+
+    # Get the release ID (from create or existing)
+    local release_id
+    release_id=$(echo "$create_result" | grep -o '"id"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 \
+      | sed 's/"id"[[:space:]]*:[[:space:]]*//')
+
+    if [[ -z "$release_id" ]]; then
+      # Try to get existing release
+      local existing
+      existing=$(gitea_api GET "/repos/${gitea_org}/${repo}/releases/tags/${tag}" 2>/dev/null) || true
+      release_id=$(echo "$existing" | grep -o '"id"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 \
+        | sed 's/"id"[[:space:]]*:[[:space:]]*//')
+    fi
+
+    if [[ -n "$release_id" ]]; then
+      # Upload assets to Gitea release
+      local uploaded=0
+      for asset_file in "${tag_dir}"/*; do
+        [[ -f "$asset_file" ]] || continue
+        local fname
+        fname=$(basename "$asset_file")
+        # Skip metadata and markers
+        [[ "$fname" == "release.json" || "$fname" == .* ]] && continue
+
+        # Upload via Gitea API (multipart form)
+        curl "${gitea_curl_opts[@]}" -X POST \
+          -H "Authorization: token $GITEA_TOKEN" \
+          -F "attachment=@${asset_file}" \
+          "${GITEA_URL}/api/v1/repos/${gitea_org}/${repo}/releases/${release_id}/assets?name=${fname}" \
+          &>>"$LOG_FILE" || true
+        (( uploaded++ )) || true
+      done
+      log "      uploaded $uploaded assets to Gitea release $tag"
+      touch "$gitea_marker"
+    else
+      warn "could not create/find Gitea release for ${gitea_org}/${repo} tag $tag"
+    fi
+  done <<< "$tag_names"
 }
 
 push_to_gitea() {

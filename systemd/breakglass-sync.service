@@ -15,7 +15,7 @@ ExecStart=/opt/breakglass/scripts/breakglass-sync.sh
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/breakglass /var/log/breakglass
+ReadWritePaths=/var/lib/breakglass /var/log/breakglass /var/lib/breakglass/releases
 # IMPORTANT: The service cannot delete from /var/lib/breakglass/audit
 # due to the append-only filesystem attribute set during install.
 PrivateTmp=true
