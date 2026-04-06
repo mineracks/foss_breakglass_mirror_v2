@@ -21,6 +21,11 @@
 # ═══════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ── Prevent git from ever prompting for credentials ──────
+# Without this, git/git-lfs will hang waiting for input when
+# running under nohup/systemd with no terminal attached.
+export GIT_TERMINAL_PROMPT=0
+
 # ── Load config ──────────────────────────────────────────
 ENV_FILE="${BREAKGLASS_ENV:-/etc/breakglass/mirror.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -742,10 +747,16 @@ push_to_gitea() {
   fi
 
   # Push LFS to Gitea — time-boxed to avoid blocking on huge repos (e.g. buildroot)
+  # Override the LFS URL so git-lfs pushes to Gitea, not back to github.com
+  # (repos often have .lfsconfig or lfs.url pointing at GitHub's LFS endpoint)
   LFS_TIMEOUT="${LFS_TIMEOUT:-600}"
   if command -v git-lfs &>/dev/null && git config --get-regexp 'lfs\.' &>/dev/null 2>&1; then
     log "    pushing LFS to Gitea (timeout: ${LFS_TIMEOUT}s) …"
-    timeout "$LFS_TIMEOUT" git -C "$bare_dir" lfs push gitea --all 2>>"$LOG_FILE" || \
+    local gitea_lfs_url
+    gitea_lfs_url=$(git -C "$bare_dir" remote get-url gitea 2>/dev/null | sed 's/\.git$//')
+    timeout "$LFS_TIMEOUT" git -C "$bare_dir" \
+      -c "lfs.url=${gitea_lfs_url}.git/info/lfs" \
+      lfs push gitea --all 2>>"$LOG_FILE" || \
       warn "LFS push skipped/incomplete for ${gitea_org}/${repo} (may have timed out)"
   fi
 
@@ -1009,36 +1020,43 @@ log "Config: $ENV_FILE"
 log "Sources: $SOURCES_FILE"
 log ""
 
-[[ -f "$SOURCES_FILE" ]] || die "sources file not found: $SOURCES_FILE"
+# ── Mode: reverse-only skips the GitHub→Gitea pull ───────
+REVERSE_SYNC_ONLY="${REVERSE_SYNC_ONLY:-}"
 
-declare -a OWNERS
-mapfile -t OWNERS < <(parse_sources)
-[[ ${#OWNERS[@]} -eq 0 ]] && die "no owners found in $SOURCES_FILE"
+if [[ -z "$REVERSE_SYNC_ONLY" ]]; then
+  [[ -f "$SOURCES_FILE" ]] || die "sources file not found: $SOURCES_FILE"
 
-for entry in "${OWNERS[@]}"; do
-  read -r _ gh_owner gitea_org include_glob exclude_glob <<< "$entry"
-  log "── Owner: $gh_owner → gitea:$gitea_org ──"
-  ensure_gitea_org "$gitea_org"
+  declare -a OWNERS
+  mapfile -t OWNERS < <(parse_sources)
+  [[ ${#OWNERS[@]} -eq 0 ]] && die "no owners found in $SOURCES_FILE"
 
-  repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )) || true; continue; }
+  for entry in "${OWNERS[@]}"; do
+    read -r _ gh_owner gitea_org include_glob exclude_glob <<< "$entry"
+    log "── Owner: $gh_owner → gitea:$gitea_org ──"
+    ensure_gitea_org "$gitea_org"
 
-  while IFS= read -r repo; do
-    [[ -z "$repo" ]] && continue
+    repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )) || true; continue; }
 
-    if ! matches_glob "$repo" "${include_glob:-*}"; then
-      (( SKIPPED++ )) || true; continue
-    fi
-    if [[ -n "$exclude_glob" ]] && matches_glob "$repo" "$exclude_glob"; then
-      (( SKIPPED++ )) || true; continue
-    fi
+    while IFS= read -r repo; do
+      [[ -z "$repo" ]] && continue
 
-    if sync_repo "$gh_owner" "$repo" "$gitea_org"; then
-      (( SYNCED++ )) || true
-    else
-      (( ERRORS++ )) || true
-    fi
-  done <<< "$repos"
-done
+      if ! matches_glob "$repo" "${include_glob:-*}"; then
+        (( SKIPPED++ )) || true; continue
+      fi
+      if [[ -n "$exclude_glob" ]] && matches_glob "$repo" "$exclude_glob"; then
+        (( SKIPPED++ )) || true; continue
+      fi
+
+      if sync_repo "$gh_owner" "$repo" "$gitea_org"; then
+        (( SYNCED++ )) || true
+      else
+        (( ERRORS++ )) || true
+      fi
+    done <<< "$repos"
+  done
+else
+  log "── REVERSE_SYNC_ONLY mode — skipping GitHub → Gitea pull ──"
+fi
 
 # ── Reverse sync (Gitea → GitHub) ────────────────────────
 run_reverse_sync
