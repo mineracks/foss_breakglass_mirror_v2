@@ -45,6 +45,10 @@ RELEASE_KEEP="${RELEASE_KEEP:-3}"
 # Enable wiki and release syncing
 SYNC_WIKIS="${SYNC_WIKIS:-true}"
 SYNC_RELEASES="${SYNC_RELEASES:-true}"
+# Reverse sync (Gitea → GitHub)
+REVERSE_SYNC_REPOS="${REVERSE_SYNC_REPOS:-}"
+GITHUB_PUSH_TOKEN="${GITHUB_PUSH_TOKEN:-}"
+GITHUB_PUSH_OWNER="${GITHUB_PUSH_OWNER:-}"
 
 mkdir -p "$MIRROR_ROOT" "$RELEASE_ROOT" "$LOG_DIR" "$AUDIT_DIR"
 
@@ -801,6 +805,163 @@ sync_repo_metadata() {
   touch "$marker"
 }
 
+# ═══════════════════════════════════════════════════════════
+# REVERSE SYNC: Push Gitea repos → GitHub (public backup)
+# ═══════════════════════════════════════════════════════════
+
+reverse_sync_repo() {
+  local gitea_org="$1" repo="$2" gh_owner="$3" gh_repo="$4"
+
+  log "  reverse-sync ${gitea_org}/${repo} → github:${gh_owner}/${gh_repo}"
+  audit "REVERSE_SYNC_START repo=${gitea_org}/${repo} target=${gh_owner}/${gh_repo}"
+
+  # ── Ensure GitHub repo exists (create if not) ──────────
+  local gh_result
+  gh_result=$(curl -sfS --connect-timeout 15 --max-time 30 \
+    -H "Authorization: Bearer ${GITHUB_PUSH_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${gh_owner}/${gh_repo}" 2>/dev/null) || true
+
+  if ! echo "$gh_result" | grep -q '"id"'; then
+    log "    creating GitHub repo: ${gh_owner}/${gh_repo}"
+    local create_payload="{\"name\":\"${gh_repo}\",\"private\":false,\"description\":\"Public backup from git.mineracks.com/${gitea_org}/${repo}\"}"
+
+    # Try org endpoint first, fall back to user endpoint
+    local create_result
+    create_result=$(curl -sfS --connect-timeout 15 --max-time 30 \
+      -X POST \
+      -H "Authorization: Bearer ${GITHUB_PUSH_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "Content-Type: application/json" \
+      -d "$create_payload" \
+      "https://api.github.com/orgs/${gh_owner}/repos" 2>/dev/null) || true
+
+    if ! echo "$create_result" | grep -q '"id"'; then
+      # Try as user repo
+      create_result=$(curl -sfS --connect-timeout 15 --max-time 30 \
+        -X POST \
+        -H "Authorization: Bearer ${GITHUB_PUSH_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Content-Type: application/json" \
+        -d "$create_payload" \
+        "https://api.github.com/user/repos" 2>/dev/null) || true
+
+      if ! echo "$create_result" | grep -q '"id"'; then
+        warn "could not create GitHub repo ${gh_owner}/${gh_repo}"
+        audit "REVERSE_SYNC_FAILED repo=${gitea_org}/${repo} reason=cannot_create_github_repo"
+        return 1
+      fi
+    fi
+    log "    GitHub repo created: ${gh_owner}/${gh_repo}"
+  fi
+
+  # ── Clone from Gitea (or use existing) ─────────────────
+  local work_dir="${MIRROR_ROOT}/.reverse-sync/${gitea_org}/${repo}.git"
+
+  # ── Build authed Gitea URL ──────────────────────────────
+  local authed_gitea
+  if [[ "${GITEA_URL}" == https://* ]]; then
+    authed_gitea="${GITEA_URL/https:\/\//https:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
+  else
+    authed_gitea="${GITEA_URL/http:\/\//http:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
+  fi
+
+  if [[ ! -d "$work_dir" ]]; then
+    log "    cloning from Gitea …"
+    mkdir -p "$(dirname "$work_dir")"
+    if ! git clone --bare "$authed_gitea" "$work_dir" 2>>"$LOG_FILE"; then
+      warn "reverse-sync clone failed for ${gitea_org}/${repo}"
+      return 1
+    fi
+  fi
+
+  cd "$work_dir" || return 1
+
+  # ── Configure remotes ──────────────────────────────────
+  # Gitea as origin (source)
+  git remote set-url origin "$authed_gitea" 2>/dev/null || git remote add origin "$authed_gitea"
+
+  # GitHub as push target
+  local authed_github="https://${GITHUB_PUSH_TOKEN}@github.com/${gh_owner}/${gh_repo}.git"
+  if git remote get-url github &>/dev/null; then
+    git remote set-url github "$authed_github"
+  else
+    git remote add github "$authed_github"
+  fi
+
+  # ── Fetch latest from Gitea ────────────────────────────
+  log "    fetching from Gitea …"
+  if ! git fetch origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' 2>>"$LOG_FILE"; then
+    warn "reverse-sync fetch from Gitea failed for ${gitea_org}/${repo}"
+    return 1
+  fi
+
+  # ── Push to GitHub ─────────────────────────────────────
+  # Only push heads and tags (not backup refs — those stay private)
+  log "    pushing to GitHub …"
+  if ! retry 3 git push github \
+      '+refs/heads/*:refs/heads/*' \
+      '+refs/tags/*:refs/tags/*' 2>>"$LOG_FILE"; then
+    warn "reverse-sync push to GitHub failed for ${gh_owner}/${gh_repo}"
+    audit "REVERSE_SYNC_FAILED repo=${gitea_org}/${repo} reason=push_failed"
+    return 1
+  fi
+
+  log "    ✓ reverse-synced to github.com/${gh_owner}/${gh_repo}"
+  audit "REVERSE_SYNC_OK repo=${gitea_org}/${repo} target=${gh_owner}/${gh_repo}"
+  return 0
+}
+
+run_reverse_sync() {
+  local repos="${REVERSE_SYNC_REPOS:-}"
+  [[ -z "$repos" ]] && return 0
+
+  local gh_push_owner="${GITHUB_PUSH_OWNER:-}"
+  if [[ -z "${GITHUB_PUSH_TOKEN:-}" ]]; then
+    warn "REVERSE_SYNC_REPOS set but GITHUB_PUSH_TOKEN is empty — skipping reverse sync"
+    return 0
+  fi
+
+  log ""
+  log "═══ Reverse sync (Gitea → GitHub) ═══"
+
+  local reverse_ok=0 reverse_fail=0
+
+  for entry in $repos; do
+    local gitea_side gh_side
+    if [[ "$entry" == *:* ]]; then
+      # Explicit mapping: gitea_org/repo:github_owner/repo
+      gitea_side="${entry%%:*}"
+      gh_side="${entry##*:}"
+    else
+      # Short form: gitea_org/repo → same on GitHub
+      gitea_side="$entry"
+      gh_side="${gh_push_owner:+${gh_push_owner}/}${entry##*/}"
+      # If no GITHUB_PUSH_OWNER, use the gitea org
+      [[ "$gh_side" == /* ]] && gh_side="${entry}"
+    fi
+
+    local g_org="${gitea_side%%/*}"
+    local g_repo="${gitea_side##*/}"
+    local gh_owner="${gh_side%%/*}"
+    local gh_repo="${gh_side##*/}"
+
+    if reverse_sync_repo "$g_org" "$g_repo" "$gh_owner" "$gh_repo"; then
+      (( reverse_ok++ )) || true
+    else
+      (( reverse_fail++ )) || true
+    fi
+  done
+
+  log "═══ Reverse sync done: ${reverse_ok} ok, ${reverse_fail} failed ═══"
+
+  if (( reverse_fail > 0 )); then
+    notify "Reverse sync: ${reverse_ok} ok, ${reverse_fail} failed — check $LOG_FILE" "high" "warning"
+  elif (( reverse_ok > 0 )); then
+    notify "Reverse sync: ${reverse_ok} repos pushed to GitHub" "low" "arrow_right"
+  fi
+}
+
 # ── Notifications ────────────────────────────────────────
 
 notify() {
@@ -878,6 +1039,9 @@ for entry in "${OWNERS[@]}"; do
     fi
   done <<< "$repos"
 done
+
+# ── Reverse sync (Gitea → GitHub) ────────────────────────
+run_reverse_sync
 
 # ── Summary ──────────────────────────────────────────────
 

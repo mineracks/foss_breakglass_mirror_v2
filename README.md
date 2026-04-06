@@ -79,6 +79,14 @@ The sync script and health check both send push notifications for significant ev
 - **Default** — sync completed successfully, new repos mirrored
 - **Low** — routine status updates
 
+### Reverse sync (Gitea to GitHub)
+
+In addition to pulling from GitHub into Gitea, you can push your own Gitea repos back to GitHub as public backups. This turns GitHub into a public mirror of your self-hosted work — your Gitea instance stays the source of truth, and GitHub is a redundant, publicly-accessible copy.
+
+Configure which repos to push in `mirror.env` using `REVERSE_SYNC_REPOS`. The script will create the GitHub repo automatically if it doesn't exist, then push all branches and tags. Backup refs (the append-only safety net) are kept private and not pushed to GitHub.
+
+This runs at the end of each daily sync cycle alongside the GitHub-to-Gitea mirror pulls.
+
 ### Disk space monitoring
 
 The health check includes disk usage monitoring. It warns at 80% usage and sends a critical alert at 90%, giving you time to expand storage or prune release assets before the mirror runs out of space.
@@ -165,6 +173,9 @@ owners:
 | `RELEASE_KEEP` | How many releases to keep per repo | `3` |
 | `RELEASE_ROOT` | Where to store downloaded release assets | `/var/lib/breakglass/releases` |
 | `FORCE_HTTP11` | Force HTTP/1.1 (helps with Cloudflare Tunnel) | `true` |
+| `REVERSE_SYNC_REPOS` | Gitea repos to push to GitHub (space-separated) | — |
+| `GITHUB_PUSH_TOKEN` | GitHub PAT for reverse sync (repo + admin scope) | — |
+| `GITHUB_PUSH_OWNER` | GitHub owner/org for reverse sync | — |
 
 ## Day-to-day commands
 
