@@ -399,8 +399,13 @@ sync_repo() {
   git config lfs.locksverify false
   git config lfs.https://${GITEA_URL#*://}.locksverify false 2>/dev/null || true
 
-  # Set up gitea remote with embedded auth
-  local authed_url="${GITEA_URL/https:\/\//https:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
+  # Set up gitea remote with embedded auth (handle both http and https)
+  local authed_url
+  if [[ "$GITEA_URL" == https://* ]]; then
+    authed_url="${GITEA_URL/https:\/\//https:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
+  else
+    authed_url="${GITEA_URL/http:\/\//http:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.git"
+  fi
   if git remote get-url gitea &>/dev/null; then
     git remote set-url gitea "$authed_url"
   else
@@ -549,7 +554,12 @@ sync_wiki() {
   }
 
   # Push wiki to Gitea (Gitea auto-creates wiki repos on first push)
-  local gitea_wiki_url="${GITEA_URL}/${gitea_org}/${repo}.wiki.git"
+  local gitea_wiki_url
+  if [[ "$GITEA_URL" == https://* ]]; then
+    gitea_wiki_url="${GITEA_URL/https:\/\//https:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.wiki.git"
+  else
+    gitea_wiki_url="${GITEA_URL/http:\/\//http:\/\/${GITEA_USER}:${GITEA_TOKEN}@}/${gitea_org}/${repo}.wiki.git"
+  fi
   if git remote get-url gitea &>/dev/null; then
     git remote set-url gitea "$gitea_wiki_url"
   else
