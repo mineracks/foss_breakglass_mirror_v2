@@ -1037,11 +1037,30 @@ if [[ -n "$ONLY_REPO" ]]; then
 fi
 
 if [[ -z "$REVERSE_SYNC_ONLY" ]]; then
-  [[ -f "$SOURCES_FILE" ]] || die "sources file not found: $SOURCES_FILE"
-
   declare -a OWNERS
-  mapfile -t OWNERS < <(parse_sources)
-  [[ ${#OWNERS[@]} -eq 0 ]] && die "no owners found in $SOURCES_FILE"
+  if [[ -n "$ONLY_REPO" ]]; then
+    # Try to find a matching owner entry in sources.yml; if missing,
+    # synthesize one so ONLY_REPO works even for unconfigured owners.
+    if [[ -f "$SOURCES_FILE" ]]; then
+      mapfile -t OWNERS < <(parse_sources)
+    fi
+    matched=""
+    for entry in "${OWNERS[@]:-}"; do
+      read -r _ gh_owner _rest <<< "$entry"
+      if [[ "$gh_owner" == "$ONLY_OWNER" ]]; then matched="$entry"; break; fi
+    done
+    if [[ -z "$matched" ]]; then
+      synth_org="${GITEA_ORG_OVERRIDE:-$ONLY_OWNER}"
+      log "── ONLY_REPO owner '$ONLY_OWNER' not in sources.yml — synthesizing entry (gitea org: $synth_org) ──"
+      OWNERS=("- $ONLY_OWNER $synth_org * ")
+    else
+      OWNERS=("$matched")
+    fi
+  else
+    [[ -f "$SOURCES_FILE" ]] || die "sources file not found: $SOURCES_FILE"
+    mapfile -t OWNERS < <(parse_sources)
+    [[ ${#OWNERS[@]} -eq 0 ]] && die "no owners found in $SOURCES_FILE"
+  fi
 
   for entry in "${OWNERS[@]}"; do
     read -r _ gh_owner gitea_org include_glob exclude_glob <<< "$entry"
