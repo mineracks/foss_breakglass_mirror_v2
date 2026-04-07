@@ -26,6 +26,10 @@ set -euo pipefail
 # running under nohup/systemd with no terminal attached.
 export GIT_TERMINAL_PROMPT=0
 
+# Trust all repo paths regardless of UID — avoids "dubious ownership" errors
+# when bare repos were created by a different user (e.g. root vs systemd unit user).
+git config --global --add safe.directory '*' 2>/dev/null || true
+
 # ── Load config ──────────────────────────────────────────
 ENV_FILE="${BREAKGLASS_ENV:-/etc/breakglass/mirror.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
