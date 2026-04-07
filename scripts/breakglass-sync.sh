@@ -1023,6 +1023,19 @@ log ""
 # ── Mode: reverse-only skips the GitHub→Gitea pull ───────
 REVERSE_SYNC_ONLY="${REVERSE_SYNC_ONLY:-}"
 
+# ── Mode: ONLY_REPO=owner/repo narrows sync to a single repo ──
+ONLY_REPO="${ONLY_REPO:-}"
+ONLY_OWNER=""
+ONLY_NAME=""
+if [[ -n "$ONLY_REPO" ]]; then
+  if [[ "$ONLY_REPO" != */* ]]; then
+    die "ONLY_REPO must be in form owner/repo (got: $ONLY_REPO)"
+  fi
+  ONLY_OWNER="${ONLY_REPO%%/*}"
+  ONLY_NAME="${ONLY_REPO##*/}"
+  log "── ONLY_REPO filter active: ${ONLY_OWNER}/${ONLY_NAME} ──"
+fi
+
 if [[ -z "$REVERSE_SYNC_ONLY" ]]; then
   [[ -f "$SOURCES_FILE" ]] || die "sources file not found: $SOURCES_FILE"
 
@@ -1032,19 +1045,30 @@ if [[ -z "$REVERSE_SYNC_ONLY" ]]; then
 
   for entry in "${OWNERS[@]}"; do
     read -r _ gh_owner gitea_org include_glob exclude_glob <<< "$entry"
+
+    if [[ -n "$ONLY_REPO" && "$gh_owner" != "$ONLY_OWNER" ]]; then
+      continue
+    fi
+
     log "── Owner: $gh_owner → gitea:$gitea_org ──"
     ensure_gitea_org "$gitea_org"
 
-    repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )) || true; continue; }
+    if [[ -n "$ONLY_REPO" ]]; then
+      repos="$ONLY_NAME"
+    else
+      repos=$(gh_list_repos "$gh_owner") || { (( ERRORS++ )) || true; continue; }
+    fi
 
     while IFS= read -r repo; do
       [[ -z "$repo" ]] && continue
 
-      if ! matches_glob "$repo" "${include_glob:-*}"; then
-        (( SKIPPED++ )) || true; continue
-      fi
-      if [[ -n "$exclude_glob" ]] && matches_glob "$repo" "$exclude_glob"; then
-        (( SKIPPED++ )) || true; continue
+      if [[ -z "$ONLY_REPO" ]]; then
+        if ! matches_glob "$repo" "${include_glob:-*}"; then
+          (( SKIPPED++ )) || true; continue
+        fi
+        if [[ -n "$exclude_glob" ]] && matches_glob "$repo" "$exclude_glob"; then
+          (( SKIPPED++ )) || true; continue
+        fi
       fi
 
       if sync_repo "$gh_owner" "$repo" "$gitea_org"; then
@@ -1059,7 +1083,11 @@ else
 fi
 
 # ── Reverse sync (Gitea → GitHub) ────────────────────────
-run_reverse_sync
+if [[ -n "$ONLY_REPO" && -z "$REVERSE_SYNC_ONLY" ]]; then
+  log "── ONLY_REPO active — skipping reverse sync ──"
+else
+  run_reverse_sync
+fi
 
 # ── Summary ──────────────────────────────────────────────
 
